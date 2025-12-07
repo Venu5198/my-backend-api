@@ -2,11 +2,11 @@ name: ci-cd-backend
 
 on:
   push:
-    branches: [ "main" ]
+    branches: ["main"]
   workflow_dispatch:
     inputs:
       DEPLOY_TARGET:
-        description: "Select deployment target"
+        description: "Choose where to deploy backend"
         required: true
         type: choice
         options:
@@ -27,16 +27,18 @@ permissions:
   id-token: write
   packages: write
 
+# ====================================================================================
+# BUILD + PUSH + COSIGN SIGN
+# ====================================================================================
 jobs:
-
   build-push-sign:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout source
         uses: actions/checkout@v4
 
-      - name: Auth to Google Cloud (WIF)
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -51,7 +53,7 @@ jobs:
         run: |
           gcloud auth configure-docker ${REGION}-docker.pkg.dev --quiet
 
-      - name: Build & Push Docker Image
+      - name: Build and push Docker image
         run: |
           docker build -t $IMAGE_URI .
           docker push $IMAGE_URI
@@ -62,7 +64,7 @@ jobs:
           chmod +x cosign-linux-amd64
           sudo mv cosign-linux-amd64 /usr/local/bin/cosign
 
-      - name: Decode Cosign key
+      - name: Decode Cosign private key
         run: |
           echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 -d > cosign.key
           chmod 600 cosign.key
@@ -72,24 +74,25 @@ jobs:
           COSIGN_PASSWORD="" cosign sign --key cosign.key $IMAGE_URI
 
       - name: Wait for vulnerability scan
-        run: |
-          echo "Waiting for Container Analysis..."
-          sleep 20
+        run: sleep 20
 
       - name: Fetch vulnerability results
         run: |
           gcloud artifacts vulnerabilities list "$IMAGE_URI" \
-            --project="${PROJECT_ID}"
+            --project="${PROJECT_ID}" || true
 
+# ====================================================================================
+# DEPLOY SECTION
+# ====================================================================================
   deploy:
     needs: build-push-sign
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout source
         uses: actions/checkout@v4
-        
-      - name: Auth to Google Cloud (WIF)
+
+      - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v1
         with:
           workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
@@ -100,6 +103,9 @@ jobs:
         with:
           project_id: ${{ env.PROJECT_ID }}
 
+      # ============================
+      # CLOUD RUN DEPLOY
+      # ============================
       - name: Deploy to Cloud Run
         if: ${{ github.event.inputs.DEPLOY_TARGET == 'cloudrun' }}
         run: |
@@ -110,6 +116,9 @@ jobs:
             --allow-unauthenticated=false \
             --service-account backend-cloudrun-sa@kxnwork.iam.gserviceaccount.com
 
+      # ============================
+      # GKE DEPLOY
+      # ============================
       - name: Configure GKE Credentials
         if: ${{ github.event.inputs.DEPLOY_TARGET == 'gke' }}
         uses: google-github-actions/get-gke-credentials@v1
@@ -121,8 +130,15 @@ jobs:
       - name: Deploy to GKE
         if: ${{ github.event.inputs.DEPLOY_TARGET == 'gke' }}
         run: |
+          # Create namespace (safe if exists)
           kubectl apply -f k8s/namespace.yaml
-          kubectl set image deployment/backend backend=$IMAGE_URI -n backend
+
+          # Primary deployment apply
           kubectl apply -f k8s/deployment.yaml -n backend
+
+          # Update image if deployment exists (safe for first deploy)
+          kubectl set image deployment/backend backend=$IMAGE_URI -n backend || true
+
+          # Apply service + HPA
           kubectl apply -f k8s/service.yaml -n backend
           kubectl apply -f k8s/hpa.yaml -n backend
