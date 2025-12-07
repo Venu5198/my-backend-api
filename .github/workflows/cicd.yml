@@ -86,6 +86,9 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        
       - name: Auth to Google Cloud (WIF)
         uses: google-github-actions/auth@v1
         with:
