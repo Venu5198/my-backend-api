@@ -1,0 +1,112 @@
+name: ci-cd-backend
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+    inputs:
+      DEPLOY_TARGET:
+        description: "cloudrun or gke"
+        required: true
+        default: "cloudrun"
+
+env:
+  PROJECT_ID: kxnwork
+  REGION: asia-south1
+  ARTIFACT_REPO: backend-repo
+  IMAGE_NAME: backend-service
+  IMAGE_TAG: ${{ github.sha }}
+  IMAGE_URI: asia-south1-docker.pkg.dev/kxnwork/backend-repo/backend-service:${{ github.sha }}
+
+permissions:
+  contents: read
+  id-token: write
+  packages: write
+
+jobs:
+
+  build-push-sign:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to Google Cloud (WIF)
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SA_EMAIL }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud --project=${PROJECT_ID} auth configure-docker ${REGION}-docker.pkg.dev --quiet
+
+      - name: Build & Push Docker Image
+        run: |
+          docker build -t $IMAGE_URI .
+          docker push $IMAGE_URI
+
+      - name: Install Cosign
+        run: |
+          wget https://github.com/sigstore/cosign/releases/download/v2.2.1/cosign-linux-amd64
+          chmod +x cosign-linux-amd64
+          sudo mv cosign-linux-amd64 /usr/local/bin/cosign
+
+      - name: Decode Cosign key
+        run: |
+          echo "${{ secrets.COSIGN_PRIVATE_KEY }}" | base64 -d > cosign.key
+          chmod 600 cosign.key
+
+      - name: Sign image with Cosign
+        run: |
+          COSIGN_PASSWORD="" cosign sign --key cosign.key $IMAGE_URI
+
+      - name: Wait for vulnerability scan
+        run: |
+          echo "Waiting for Container Analysis..."
+          sleep 20
+
+      - name: Fetch vulnerability results
+        run: |
+          gcloud container analysis occurrences list \
+            --project=${PROJECT_ID} \
+            --filter="resourceUrl=$IMAGE_URI"
+
+  deploy:
+    needs: build-push-sign
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Auth to Google Cloud (WIF)
+        uses: google-github-actions/auth@v1
+        with:
+          workload_identity_provider: ${{ secrets.WIF_PROVIDER }}
+          service_account: ${{ secrets.WIF_SA_EMAIL }}
+
+      - name: Deploy to Cloud Run
+        if: ${{ github.event.inputs.DEPLOY_TARGET == 'cloudrun' }}
+        run: |
+          gcloud run deploy backend-cloudrun \
+            --image $IMAGE_URI \
+            --region $REGION \
+            --platform managed \
+            --allow-unauthenticated=false \
+            --service-account backend-cloudrun-sa@kxnwork.iam.gserviceaccount.com
+
+      - name: Configure GKE Credentials
+        if: ${{ github.event.inputs.DEPLOY_TARGET == 'gke' }}
+        uses: google-github-actions/get-gke-credentials@v1
+        with:
+          cluster_name: ${{ secrets.GKE_CLUSTER_NAME }}
+          location: ${{ secrets.GKE_CLUSTER_LOCATION }}
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Deploy to GKE
+        if: ${{ github.event.inputs.DEPLOY_TARGET == 'gke' }}
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl set image deployment/backend backend=$IMAGE_URI -n backend
+          kubectl apply -f k8s/deployment.yaml -n backend
+          kubectl apply -f k8s/service.yaml -n backend
+          kubectl apply -f k8s/hpa.yaml -n backend
