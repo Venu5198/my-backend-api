@@ -6,9 +6,13 @@ on:
   workflow_dispatch:
     inputs:
       DEPLOY_TARGET:
-        description: "cloudrun or gke"
+        description: "Select deployment target"
         required: true
-        default: "cloudrun"
+        type: choice
+        options:
+          - cloudrun
+          - gke
+        default: cloudrun
 
 env:
   PROJECT_ID: kxnwork
