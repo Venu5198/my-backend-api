@@ -12,7 +12,7 @@ on:
         options:
           - cloudrun
           - gke
-        default: cloudrun
+        default: gke
 
 env:
   PROJECT_ID: kxnwork
