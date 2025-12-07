@@ -74,9 +74,8 @@ jobs:
 
       - name: Fetch vulnerability results
         run: |
-          gcloud container analysis occurrences list \
-            --project=${PROJECT_ID} \
-            --filter="resourceUrl=$IMAGE_URI"
+          gcloud artifacts vulnerabilities list "$IMAGE_URI" \
+            --project="${PROJECT_ID}"
 
   deploy:
     needs: build-push-sign
