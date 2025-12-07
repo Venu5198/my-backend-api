@@ -113,7 +113,6 @@ jobs:
             --image $IMAGE_URI \
             --region $REGION \
             --platform managed \
-            --allow-unauthenticated=false \
             --service-account backend-cloudrun-sa@kxnwork.iam.gserviceaccount.com
 
       # ============================
